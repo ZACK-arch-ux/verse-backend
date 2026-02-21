@@ -51,6 +51,10 @@ app.get("/", (req, res) => {
 app.post("/register", async (req, res) => {
   const { email, password } = req.body;
 
+  if (!email || !password) {
+    return res.status(400).json({ message: "All fields required" });
+  }
+
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
 
@@ -60,12 +64,12 @@ app.post("/register", async (req, res) => {
     );
 
     res.json({ message: "User registered successfully" });
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Registration failed" });
+    console.error("REGISTER ERROR:", err);
+    res.status(500).json({ error: err.message });
   }
 });
-
 /* ================= LOGIN ================= */
 
 app.post("/login", async (req, res) => {
