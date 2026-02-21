@@ -17,7 +17,16 @@ const pool = new Pool({
     rejectUnauthorized: false,
   },
 });
-
+pool.query(`
+  CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    profile_picture TEXT
+  );
+`)
+.then(() => console.log("Users table ready"))
+.catch(err => console.error("Table error:", err));
 /* ================= AUTH MIDDLEWARE ================= */
 
 const authenticateToken = (req, res, next) => {
