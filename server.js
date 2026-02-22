@@ -25,12 +25,21 @@ pool.query(`
   CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     email VARCHAR(255) UNIQUE NOT NULL,
+    phone VARCHAR(20) UNIQUE,
     password TEXT NOT NULL,
     profile_picture TEXT
   );
 `)
 .then(() => console.log("Users table ready"))
 .catch(err => console.error("Users table error:", err));
+
+// Ensure phone column exists (for old databases)
+pool.query(`
+  ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS phone VARCHAR(20) UNIQUE;
+`)
+.then(() => console.log("Phone column ready"))
+.catch(err => console.error("Phone column error:", err));
 
 // Posts table
 pool.query(`
@@ -69,9 +78,9 @@ app.get("/", (req, res) => {
 /* ================= REGISTER ================= */
 
 app.post("/register", async (req, res) => {
-  const { email, password } = req.body;
+  const { email, phone, password } = req.body;
 
-  if (!email || !password) {
+  if (!email || !phone || !password) {
     return res.status(400).json({ message: "All fields required" });
   }
 
@@ -79,8 +88,8 @@ app.post("/register", async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     await pool.query(
-      "INSERT INTO users (email, password) VALUES ($1, $2)",
-      [email, hashedPassword]
+      "INSERT INTO users (email, phone, password) VALUES ($1, $2, $3)",
+      [email, phone, hashedPassword]
     );
 
     res.json({ message: "User registered successfully" });
@@ -92,14 +101,14 @@ app.post("/register", async (req, res) => {
 });
 
 
-/* ================= LOGIN ================= */
+/* ================= LOGIN (Email OR Phone) ================= */
 
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
   try {
     const result = await pool.query(
-      "SELECT * FROM users WHERE email = $1",
+      "SELECT * FROM users WHERE email = $1 OR phone = $1",
       [email]
     );
 
@@ -127,9 +136,11 @@ app.post("/login", async (req, res) => {
       user: {
         id: user.id,
         email: user.email,
+        phone: user.phone,
         profile_picture: user.profile_picture,
       },
     });
+
   } catch (err) {
     console.error("LOGIN ERROR:", err);
     res.status(500).json({ message: "Login failed" });
@@ -153,6 +164,7 @@ app.post("/create-post", authenticateToken, async (req, res) => {
     );
 
     res.json({ message: "Post created successfully" });
+
   } catch (err) {
     console.error("CREATE POST ERROR:", err);
     res.status(500).json({ message: "Error creating post" });
@@ -172,6 +184,7 @@ app.get("/posts", async (req, res) => {
     `);
 
     res.json(result.rows);
+
   } catch (err) {
     console.error("GET POSTS ERROR:", err);
     res.status(500).json({ message: "Error fetching posts" });
@@ -191,6 +204,7 @@ app.post("/update-profile-picture", authenticateToken, async (req, res) => {
     );
 
     res.json({ message: "Profile picture updated" });
+
   } catch (err) {
     console.error("UPDATE PROFILE ERROR:", err);
     res.status(500).json({ message: "Update failed" });
@@ -225,6 +239,7 @@ app.post("/change-password", authenticateToken, async (req, res) => {
     );
 
     res.json({ message: "Password changed successfully" });
+
   } catch (err) {
     console.error("CHANGE PASSWORD ERROR:", err);
     res.status(500).json({ message: "Password change failed" });
