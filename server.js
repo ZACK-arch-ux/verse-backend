@@ -17,6 +17,10 @@ const pool = new Pool({
     rejectUnauthorized: false,
   },
 });
+
+/* ================= CREATE TABLES ================= */
+
+// Users table
 pool.query(`
   CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -26,7 +30,21 @@ pool.query(`
   );
 `)
 .then(() => console.log("Users table ready"))
-.catch(err => console.error("Table error:", err));
+.catch(err => console.error("Users table error:", err));
+
+// Posts table
+pool.query(`
+  CREATE TABLE IF NOT EXISTS posts (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id),
+    content TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+`)
+.then(() => console.log("Posts table ready"))
+.catch(err => console.error("Posts table error:", err));
+
+
 /* ================= AUTH MIDDLEWARE ================= */
 
 const authenticateToken = (req, res, next) => {
@@ -40,11 +58,13 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+
 /* ================= TEST ROUTE ================= */
 
 app.get("/", (req, res) => {
   res.send("Verse Backend Running Securely 🚀");
 });
+
 
 /* ================= REGISTER ================= */
 
@@ -70,6 +90,8 @@ app.post("/register", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
 /* ================= LOGIN ================= */
 
 app.post("/login", async (req, res) => {
@@ -109,10 +131,53 @@ app.post("/login", async (req, res) => {
       },
     });
   } catch (err) {
-    console.error(err);
+    console.error("LOGIN ERROR:", err);
     res.status(500).json({ message: "Login failed" });
   }
 });
+
+
+/* ================= CREATE POST ================= */
+
+app.post("/create-post", authenticateToken, async (req, res) => {
+  const { content } = req.body;
+
+  if (!content) {
+    return res.status(400).json({ message: "Post content required" });
+  }
+
+  try {
+    await pool.query(
+      "INSERT INTO posts (user_id, content) VALUES ($1, $2)",
+      [req.user.id, content]
+    );
+
+    res.json({ message: "Post created successfully" });
+  } catch (err) {
+    console.error("CREATE POST ERROR:", err);
+    res.status(500).json({ message: "Error creating post" });
+  }
+});
+
+
+/* ================= GET ALL POSTS ================= */
+
+app.get("/posts", async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT posts.id, posts.content, posts.created_at, users.email
+      FROM posts
+      JOIN users ON posts.user_id = users.id
+      ORDER BY posts.created_at DESC
+    `);
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("GET POSTS ERROR:", err);
+    res.status(500).json({ message: "Error fetching posts" });
+  }
+});
+
 
 /* ================= UPDATE PROFILE PICTURE ================= */
 
@@ -127,10 +192,11 @@ app.post("/update-profile-picture", authenticateToken, async (req, res) => {
 
     res.json({ message: "Profile picture updated" });
   } catch (err) {
-    console.error(err);
+    console.error("UPDATE PROFILE ERROR:", err);
     res.status(500).json({ message: "Update failed" });
   }
 });
+
 
 /* ================= CHANGE PASSWORD ================= */
 
@@ -160,10 +226,11 @@ app.post("/change-password", authenticateToken, async (req, res) => {
 
     res.json({ message: "Password changed successfully" });
   } catch (err) {
-    console.error(err);
+    console.error("CHANGE PASSWORD ERROR:", err);
     res.status(500).json({ message: "Password change failed" });
   }
 });
+
 
 /* ================= START SERVER ================= */
 
