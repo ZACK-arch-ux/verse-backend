@@ -4,6 +4,8 @@ const cors = require("cors");
 const { Pool } = require("pg");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const http = require("http");
+const { Server } = require("socket.io");
 
 const app = express();
 app.use(cors());
@@ -29,16 +31,14 @@ pool.query(`
     password TEXT NOT NULL,
     profile_picture TEXT
   );
-`)
-.then(() => console.log("Users table ready"))
+`).then(() => console.log("Users table ready"))
 .catch(err => console.error("Users table error:", err));
 
-// Ensure phone column exists (for old databases)
+// Ensure phone column exists
 pool.query(`
   ALTER TABLE users
   ADD COLUMN IF NOT EXISTS phone VARCHAR(20) UNIQUE;
-`)
-.then(() => console.log("Phone column ready"))
+`).then(() => console.log("Phone column ready"))
 .catch(err => console.error("Phone column error:", err));
 
 // Posts table
@@ -49,9 +49,20 @@ pool.query(`
     content TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
-`)
-.then(() => console.log("Posts table ready"))
+`).then(() => console.log("Posts table ready"))
 .catch(err => console.error("Posts table error:", err));
+
+// Messages table
+pool.query(`
+  CREATE TABLE IF NOT EXISTS messages (
+    id SERIAL PRIMARY KEY,
+    sender_id INTEGER REFERENCES users(id),
+    receiver_id INTEGER REFERENCES users(id),
+    message TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+`).then(() => console.log("Messages table ready"))
+.catch(err => console.error("Messages table error:", err));
 
 
 /* ================= AUTH MIDDLEWARE ================= */
@@ -68,7 +79,7 @@ const authenticateToken = (req, res, next) => {
 };
 
 
-/* ================= TEST ROUTE ================= */
+/* ================= BASIC ROUTE ================= */
 
 app.get("/", (req, res) => {
   res.send("Verse Backend Running Securely 🚀");
@@ -101,7 +112,7 @@ app.post("/register", async (req, res) => {
 });
 
 
-/* ================= LOGIN (Email OR Phone) ================= */
+/* ================= LOGIN ================= */
 
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
@@ -117,7 +128,6 @@ app.post("/login", async (req, res) => {
     }
 
     const user = result.rows[0];
-
     const validPassword = await bcrypt.compare(password, user.password);
 
     if (!validPassword) {
@@ -132,13 +142,12 @@ app.post("/login", async (req, res) => {
 
     res.json({
       message: "Login successful",
-      token: token,
+      token,
       user: {
         id: user.id,
         email: user.email,
-        phone: user.phone,
-        profile_picture: user.profile_picture,
-      },
+        phone: user.phone
+      }
     });
 
   } catch (err) {
@@ -148,102 +157,51 @@ app.post("/login", async (req, res) => {
 });
 
 
-/* ================= CREATE POST ================= */
+/* ================= SOCKET.IO REAL-TIME CHAT ================= */
 
-app.post("/create-post", authenticateToken, async (req, res) => {
-  const { content } = req.body;
+const server = http.createServer(app);
 
-  if (!content) {
-    return res.status(400).json({ message: "Post content required" });
-  }
-
-  try {
-    await pool.query(
-      "INSERT INTO posts (user_id, content) VALUES ($1, $2)",
-      [req.user.id, content]
-    );
-
-    res.json({ message: "Post created successfully" });
-
-  } catch (err) {
-    console.error("CREATE POST ERROR:", err);
-    res.status(500).json({ message: "Error creating post" });
-  }
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+  },
 });
 
+io.on("connection", (socket) => {
+  console.log("User connected:", socket.id);
 
-/* ================= GET ALL POSTS ================= */
+  // Join personal room
+  socket.on("join", (userId) => {
+    socket.join(userId);
+    console.log("User joined room:", userId);
+  });
 
-app.get("/posts", async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT posts.id, posts.content, posts.created_at, users.email
-      FROM posts
-      JOIN users ON posts.user_id = users.id
-      ORDER BY posts.created_at DESC
-    `);
+  // Send message
+  socket.on("send_message", async (data) => {
+    const { senderId, receiverId, message } = data;
 
-    res.json(result.rows);
+    try {
+      // Save in database
+      await pool.query(
+        "INSERT INTO messages (sender_id, receiver_id, message) VALUES ($1, $2, $3)",
+        [senderId, receiverId, message]
+      );
 
-  } catch (err) {
-    console.error("GET POSTS ERROR:", err);
-    res.status(500).json({ message: "Error fetching posts" });
-  }
-});
+      // Send instantly to receiver
+      io.to(receiverId).emit("receive_message", {
+        senderId,
+        message,
+        created_at: new Date()
+      });
 
-
-/* ================= UPDATE PROFILE PICTURE ================= */
-
-app.post("/update-profile-picture", authenticateToken, async (req, res) => {
-  const { profile_picture } = req.body;
-
-  try {
-    await pool.query(
-      "UPDATE users SET profile_picture = $1 WHERE id = $2",
-      [profile_picture, req.user.id]
-    );
-
-    res.json({ message: "Profile picture updated" });
-
-  } catch (err) {
-    console.error("UPDATE PROFILE ERROR:", err);
-    res.status(500).json({ message: "Update failed" });
-  }
-});
-
-
-/* ================= CHANGE PASSWORD ================= */
-
-app.post("/change-password", authenticateToken, async (req, res) => {
-  const { oldPassword, newPassword } = req.body;
-
-  try {
-    const result = await pool.query(
-      "SELECT * FROM users WHERE id = $1",
-      [req.user.id]
-    );
-
-    const user = result.rows[0];
-
-    const validPassword = await bcrypt.compare(oldPassword, user.password);
-
-    if (!validPassword) {
-      return res.status(401).json({ message: "Old password incorrect" });
+    } catch (err) {
+      console.error("Socket message error:", err);
     }
+  });
 
-    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
-
-    await pool.query(
-      "UPDATE users SET password = $1 WHERE id = $2",
-      [hashedNewPassword, req.user.id]
-    );
-
-    res.json({ message: "Password changed successfully" });
-
-  } catch (err) {
-    console.error("CHANGE PASSWORD ERROR:", err);
-    res.status(500).json({ message: "Password change failed" });
-  }
+  socket.on("disconnect", () => {
+    console.log("User disconnected");
+  });
 });
 
 
@@ -251,6 +209,6 @@ app.post("/change-password", authenticateToken, async (req, res) => {
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
