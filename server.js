@@ -83,25 +83,34 @@ app.get("/", (req, res) => {
 /* ================= REGISTER ================= */
 
 app.post("/register", async (req, res) => {
-  const { username, email, phone, password } = req.body;
-
-  if (!username || !email || !phone || !password) {
-    return res.status(400).json({ message: "All fields required" });
-  }
-
   try {
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const { email, phone, password, username } = req.body;
 
-    await pool.query(
-      "INSERT INTO users (username, email, phone, password) VALUES ($1,$2,$3,$4)",
-      [username, email, phone, hashedPassword]
+    if (!email || !phone || !password || !username) {
+      return res.status(400).json({ message: "All fields required" });
+    }
+
+    const existing = await pool.query(
+      "SELECT * FROM users WHERE email=$1",
+      [email]
     );
 
-    res.json({ message: "User registered successfully" });
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ message: "Email already exists" });
+    }
+
+    const hashed = await bcrypt.hash(password, 10);
+
+    await pool.query(
+      "INSERT INTO users(email, phone, password, username) VALUES($1,$2,$3,$4)",
+      [email, phone, hashed, username]
+    );
+
+    res.status(201).json({ message: "Registered successfully" });
 
   } catch (err) {
     console.error("REGISTER ERROR:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ message: "Server error" });
   }
 });
 
