@@ -1,87 +1,41 @@
 require("dotenv").config();
-
 const express = require("express");
-const cors = require("cors");
-const { Pool } = require("pg");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const { Pool } = require("pg");
+const cors = require("cors");
 const http = require("http");
 const { Server } = require("socket.io");
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+
 app.use(cors());
 app.use(express.json());
 
-/* ================= DATABASE CONNECTION ================= */
-
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ssl: { rejectUnauthorized: false }
 });
 
-/* ================= CREATE TABLES ================= */
+const PORT = process.env.PORT || 3000;
 
-// USERS TABLE
-pool.query(`
-CREATE TABLE IF NOT EXISTS users (
-  id SERIAL PRIMARY KEY,
-  username VARCHAR(50) UNIQUE NOT NULL,
-  email VARCHAR(255) UNIQUE NOT NULL,
-  phone VARCHAR(20) UNIQUE NOT NULL,
-  password TEXT NOT NULL,
-  profile_picture TEXT,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-`).then(() => console.log("Users table ready"))
-.catch(err => console.error("Users table error:", err));
+// ================= JWT MIDDLEWARE =================
+function verifyToken(req, res, next) {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ message: "No token provided" });
 
-// POSTS TABLE
-pool.query(`
-CREATE TABLE IF NOT EXISTS posts (
-  id SERIAL PRIMARY KEY,
-  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-  content TEXT NOT NULL,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-`).then(() => console.log("Posts table ready"))
-.catch(err => console.error("Posts table error:", err));
-
-// MESSAGES TABLE
-pool.query(`
-CREATE TABLE IF NOT EXISTS messages (
-  id SERIAL PRIMARY KEY,
-  sender_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-  receiver_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-  message TEXT NOT NULL,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-`).then(() => console.log("Messages table ready"))
-.catch(err => console.error("Messages table error:", err));
-
-
-/* ================= AUTH MIDDLEWARE ================= */
-
-function authenticateToken(req, res, next) {
-  const token = req.headers["authorization"];
-  if (!token) return res.status(401).json({ message: "Access denied" });
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ message: "Invalid token" });
-    req.user = user;
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
     next();
-  });
+  } catch (err) {
+    return res.status(401).json({ message: "Invalid token" });
+  }
 }
 
-
-/* ================= BASIC ROUTE ================= */
-
-app.get("/", (req, res) => {
-  res.send("Verse Backend Running Securely 🚀");
-});
-
-
-/* ================= REGISTER ================= */
-
+// ================= REGISTER =================
 app.post("/register", async (req, res) => {
   try {
     const { email, phone, password, username } = req.body;
@@ -90,13 +44,22 @@ app.post("/register", async (req, res) => {
       return res.status(400).json({ message: "All fields required" });
     }
 
-    const existing = await pool.query(
+    const existingEmail = await pool.query(
       "SELECT * FROM users WHERE email=$1",
       [email]
     );
 
-    if (existing.rows.length > 0) {
+    if (existingEmail.rows.length > 0) {
       return res.status(400).json({ message: "Email already exists" });
+    }
+
+    const existingUsername = await pool.query(
+      "SELECT * FROM users WHERE username=$1",
+      [username]
+    );
+
+    if (existingUsername.rows.length > 0) {
+      return res.status(400).json({ message: "Username already taken" });
     }
 
     const hashed = await bcrypt.hash(password, 10);
@@ -114,142 +77,174 @@ app.post("/register", async (req, res) => {
   }
 });
 
-
-/* ================= LOGIN ================= */
-
+// ================= LOGIN =================
 app.post("/login", async (req, res) => {
-  const { emailOrPhone, password } = req.body;
-
   try {
+    const { email, password } = req.body;
+
     const result = await pool.query(
-      "SELECT * FROM users WHERE email=$1 OR phone=$1",
-      [emailOrPhone]
+      "SELECT * FROM users WHERE email=$1",
+      [email]
     );
 
     if (result.rows.length === 0) {
-      return res.status(401).json({ message: "User not found" });
+      return res.status(401).json({ message: "Invalid credentials" });
     }
 
     const user = result.rows[0];
-    const validPassword = await bcrypt.compare(password, user.password);
+    const valid = await bcrypt.compare(password, user.password);
 
-    if (!validPassword) {
-      return res.status(401).json({ message: "Invalid password" });
+    if (!valid) {
+      return res.status(401).json({ message: "Invalid credentials" });
     }
 
     const token = jwt.sign(
-      { id: user.id, username: user.username },
+      { id: user.id, email: user.email },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
 
-    res.json({
-      message: "Login successful",
-      token,
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        phone: user.phone
-      }
-    });
+    res.json({ token });
 
   } catch (err) {
     console.error("LOGIN ERROR:", err);
-    res.status(500).json({ message: "Login failed" });
+    res.status(500).json({ message: "Server error" });
   }
 });
 
-
-/* ================= SEARCH USERS ================= */
-
-app.get("/search-users/:query", authenticateToken, async (req, res) => {
-  const search = `%${req.params.query}%`;
-
+// ================= PROFILE =================
+app.get("/profile/:id", verifyToken, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT id, username FROM users WHERE username ILIKE $1 LIMIT 10",
-      [search]
+      "SELECT id, email, username, phone, bio, profile_image FROM users WHERE id=$1",
+      [req.params.id]
     );
-
-    res.json(result.rows);
-
+    res.json(result.rows[0]);
   } catch (err) {
-    console.error("Search error:", err);
-    res.status(500).json({ message: "Search failed" });
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
   }
 });
 
-
-/* ================= GET OLD MESSAGES ================= */
-
-app.get("/messages/:receiverId", authenticateToken, async (req, res) => {
-  const receiverId = req.params.receiverId;
-
+// ================= FOLLOW =================
+app.post("/follow/:id", verifyToken, async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT * FROM messages
-       WHERE (sender_id=$1 AND receiver_id=$2)
-       OR (sender_id=$2 AND receiver_id=$1)
-       ORDER BY created_at ASC`,
-      [req.user.id, receiverId]
+    await pool.query(
+      "INSERT INTO followers(follower_id, following_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
+      [req.user.id, req.params.id]
     );
-
-    res.json(result.rows);
-
+    res.json({ message: "Followed" });
   } catch (err) {
-    console.error("Get messages error:", err);
-    res.status(500).json({ message: "Failed to load messages" });
+    res.status(500).json({ message: "Server error" });
   }
 });
 
-
-/* ================= SOCKET.IO REAL-TIME CHAT ================= */
-
-const server = http.createServer(app);
-
-const io = new Server(server, {
-  cors: { origin: "*" },
+// ================= UNFOLLOW =================
+app.delete("/unfollow/:id", verifyToken, async (req, res) => {
+  try {
+    await pool.query(
+      "DELETE FROM followers WHERE follower_id=$1 AND following_id=$2",
+      [req.user.id, req.params.id]
+    );
+    res.json({ message: "Unfollowed" });
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
+// ================= CREATE POST =================
+app.post("/posts", verifyToken, async (req, res) => {
+  try {
+    const { content, image_url } = req.body;
+
+    await pool.query(
+      "INSERT INTO posts(user_id, content, image_url) VALUES($1,$2,$3)",
+      [req.user.id, content, image_url]
+    );
+
+    res.json({ message: "Post created" });
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// ================= FEED =================
+app.get("/feed", verifyToken, async (req, res) => {
+  try {
+    const posts = await pool.query(`
+      SELECT posts.*, users.username
+      FROM posts
+      JOIN users ON posts.user_id = users.id
+      ORDER BY posts.created_at DESC
+    `);
+
+    res.json(posts.rows);
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// ================= LIKE =================
+app.post("/like/:postId", verifyToken, async (req, res) => {
+  try {
+    await pool.query(
+      "INSERT INTO likes(user_id, post_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
+      [req.user.id, req.params.postId]
+    );
+    res.json({ message: "Liked" });
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// ================= COMMENT =================
+app.post("/comment/:postId", verifyToken, async (req, res) => {
+  try {
+    await pool.query(
+      "INSERT INTO comments(user_id, post_id, comment) VALUES($1,$2,$3)",
+      [req.user.id, req.params.postId, req.body.comment]
+    );
+    res.json({ message: "Comment added" });
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// ================= REELS =================
+app.post("/reels", verifyToken, async (req, res) => {
+  try {
+    const { video_url, caption } = req.body;
+
+    await pool.query(
+      "INSERT INTO reels(user_id, video_url, caption) VALUES($1,$2,$3)",
+      [req.user.id, video_url, caption]
+    );
+
+    res.json({ message: "Reel uploaded" });
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// ================= CHAT =================
 io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
-
-  socket.on("join", (userId) => {
-    socket.join(userId);
-    console.log("User joined room:", userId);
-  });
-
-  socket.on("send_message", async (data) => {
+  socket.on("sendMessage", async (data) => {
     const { senderId, receiverId, message } = data;
 
-    try {
-      await pool.query(
-        "INSERT INTO messages (sender_id, receiver_id, message) VALUES ($1,$2,$3)",
-        [senderId, receiverId, message]
-      );
+    await pool.query(
+      "INSERT INTO messages(sender_id, receiver_id, message) VALUES($1,$2,$3)",
+      [senderId, receiverId, message]
+    );
 
-      io.to(receiverId).emit("receive_message", {
-        senderId,
-        message,
-        created_at: new Date()
-      });
-
-    } catch (err) {
-      console.error("Socket message error:", err);
-    }
-  });
-
-  socket.on("disconnect", () => {
-    console.log("User disconnected");
+    io.emit("receiveMessage", data);
   });
 });
 
-
-/* ================= START SERVER ================= */
-
-const PORT = process.env.PORT || 5000;
+// ================= ROOT =================
+app.get("/", (req, res) => {
+  res.send("Backend running successfully 🚀");
+});
 
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log("Server started on port", PORT);
 });
